@@ -243,7 +243,8 @@ def _backend(monkeypatch, *, fail, angle_fail=False, enable_angle=True):
 
     state = {"fail": fail, "angle_fail": angle_fail}
 
-    def _factory(sync):
+    def _factory(sync, *, fps):
+        assert fps == 50
         return _FakeOakd(sync, fail=state["fail"])
 
     def _angle_factory(sync):
@@ -298,7 +299,7 @@ def test_a_plain_missing_oakd_is_not_a_fault(monkeypatch):
     # unusable CALIBRATION is treated as a fault.
     from grabette.hardware import oakd as oakd_mod
 
-    def _boom(sync):
+    def _boom(sync, *, fps):
         raise RuntimeError("no device found")
 
     monkeypatch.setattr(oakd_mod, "OakdCapture", _boom)

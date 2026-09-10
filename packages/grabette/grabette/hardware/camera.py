@@ -18,12 +18,12 @@ class VideoCapture:
 
     Default configuration:
         - Resolution: 1296x972 (native OV5647 binned mode)
-        - Frame rate: 46 fps (CFR)
+        - Frame rate: 50 fps (CFR)
         - Codec: H.264 at ~5 Mbps
     """
 
     DEFAULT_RESOLUTION = (1296, 972)
-    DEFAULT_FPS = 46
+    DEFAULT_FPS = 50
     DEFAULT_BITRATE = 5_000_000
 
     def __init__(

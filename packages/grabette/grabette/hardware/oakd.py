@@ -91,7 +91,7 @@ class OakdCapture:
         shutdown() → pipeline stops, threads exit
     """
 
-    DEFAULT_FPS = 30
+    DEFAULT_FPS = 50
     DEFAULT_RESOLUTION = (1280, 800)
     DEFAULT_DEPTH_RESOLUTION = (640, 400)
     DEFAULT_IMU_HZ = 200

@@ -31,7 +31,7 @@ _PACKAGE_ROOT = Path(__file__).resolve().parents[2]
 _CAMERA_INTRINSICS_SRC = _PACKAGE_ROOT / "config" / "rpi_camera_intrinsics.json"
 _URDF_ROOT = _PACKAGE_ROOT / "urdf"
 
-FPS = 46
+FPS = 50
 
 # How long start_capture waits for the OAK-D to produce valid (post-warmup)
 # frames before starting the recording clock. Safety fallback only — the OAK-D
@@ -183,7 +183,7 @@ class RpiBackend(Backend):
                     ir_gain=self._orbbec_ir_gain,
                 )
             else:
-                self._oakd = OakdCapture(self._sync)
+                self._oakd = OakdCapture(self._sync, fps=FPS)
             self._oakd.init_device()
             self._clear_hw_error(_HW_OAKD)
             logger.info("Depth camera initialized: %s", self._depth_camera)
