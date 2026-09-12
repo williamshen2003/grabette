@@ -97,7 +97,7 @@ class OakdCapture:
     DEFAULT_IMU_HZ = 200
     DEFAULT_BITRATE_BPS = 8_000_000
     DEFAULT_KEYFRAME_EVERY = 30
-    DEFAULT_DEPTH_PNG_COMPRESSION = 1
+    DEFAULT_DEPTH_PNG_COMPRESSION = 0
 
     # Depth visualization range (mm) for live JPEG preview
     PREVIEW_DEPTH_MIN_MM = 200
@@ -227,11 +227,11 @@ class OakdCapture:
         )
 
         # StereoDepth — exposes rectifiedLeft / rectifiedRight / depth.
-        # PresetMode.ROBOTICS is tuned for manipulation/close-range use.
+        # FAST_ACCURACY sustains 50 fps on the OAK-D SR at 640x400.
         stereo = self._pipeline.create(dai.node.StereoDepth).build(
             left=leftStereoIn,
             right=rightStereoIn,
-            presetMode=dai.node.StereoDepth.PresetMode.ROBOTICS,
+            presetMode=dai.node.StereoDepth.PresetMode.FAST_ACCURACY,
         )
         stereo.setOutputSize(*self.depth_resolution)
         stereo.setLeftRightCheck(True)
