@@ -4,6 +4,7 @@ Ported from grabette-capture/grabette_capture/video.py.
 """
 
 import gc
+import io
 import logging
 import subprocess
 from pathlib import Path
@@ -45,6 +46,7 @@ class VideoCapture:
         self._output_path: Path | None = None
         self._h264_path: Path | None = None
         self._frame_timestamps: list[float] = []
+        self._encoder_pts = io.StringIO()
         self._recording = False
         self._frame_count: int = 0
 
@@ -82,18 +84,6 @@ class VideoCapture:
 
         self._picam2.start()
 
-    def _on_frame(self, request) -> None:
-        if self._recording:
-            metadata = request.get_metadata()
-            sensor_ts_ns = metadata.get("SensorTimestamp")
-
-            if sensor_ts_ns is not None:
-                ts = self.sync.boottime_ns_to_ms(sensor_ts_ns)
-            else:
-                ts = self.sync.get_timestamp_ms()
-
-            self._frame_timestamps.append(ts)
-
     def start_recording(self, output_path: Path) -> None:
         if self._recording:
             raise RuntimeError("Video capture already running")
@@ -106,11 +96,13 @@ class VideoCapture:
         self._h264_path = self._output_path.with_suffix(".h264")
         self._frame_timestamps = []
         self._frame_count = 0
-        self._picam2.pre_callback = self._on_frame
+        self._encoder_pts = io.StringIO()
 
         self._recording = True
         gc.disable()  # Prevent GC pauses from dropping frames during recording
-        self._picam2.start_encoder(self._encoder, str(self._h264_path))
+        self._picam2.start_encoder(
+            self._encoder, str(self._h264_path), pts=self._encoder_pts,
+        )
 
     def stop(self) -> list[float]:
         if not self._recording:
@@ -119,6 +111,10 @@ class VideoCapture:
         self._recording = False
         self._picam2.stop_encoder()
         gc.enable()
+        # FileOutput writes PTS only for saved frames, including the stop drain.
+        # PTS is milliseconds relative to the encoder's first SensorTimestamp
+        # (microseconds, CLOCK_BOOTTIME), not relative to recording start.
+        first_timestamp = self._encoder.firsttimestamp
         if self.preview:
             try:
                 self._picam2.stop_preview()
@@ -129,6 +125,12 @@ class VideoCapture:
         self._picam2 = None
         self._encoder = None
 
+        if first_timestamp is None:
+            raise RuntimeError("Camera encoder produced no timestamped frames")
+        origin_ms = self.sync.boottime_ns_to_ms(first_timestamp * 1000)
+        self._frame_timestamps = [
+            origin_ms + float(pts) for pts in self._encoder_pts.getvalue().splitlines()
+        ]
         self._mux_to_mp4()
         return self._frame_timestamps
 
@@ -153,8 +155,13 @@ class VideoCapture:
         result = subprocess.run(cmd, capture_output=True, text=True)
         if result.returncode != 0:
             raise RuntimeError(f"ffmpeg muxing failed: {result.stderr}")
-        self._h264_path.unlink()
         self._frame_count = self._count_frames_ffprobe()
+        if not self._frame_count or self._frame_count != len(self._frame_timestamps):
+            raise RuntimeError(
+                f"Camera video/timestamp mismatch: {self._frame_count} frames, "
+                f"{len(self._frame_timestamps)} timestamps; keeping raw H.264"
+            )
+        self._h264_path.unlink()
 
     def _count_frames_ffprobe(self) -> int:
         if self._output_path is None or not self._output_path.exists():
