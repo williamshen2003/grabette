@@ -132,6 +132,7 @@ class RelayClient:
         # fault into the activity enum would have made it invisible to a fleet
         # that only knows the four activity values.
         fault_provider: Optional[Callable[[], Optional[str]]] = None,
+        capture_provider: Optional[Callable[[], dict]] = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.token_provider = token_provider
@@ -146,6 +147,7 @@ class RelayClient:
         self.tasks_rev_provider = tasks_rev_provider
         self.activity_provider = activity_provider
         self.fault_provider = fault_provider
+        self.capture_provider = capture_provider
         self._last_reported_rev: Optional[int] = None  # last task revision sent to the fleet
         self._battery: Optional[float] = None  # cached; refreshed off the heartbeat path
         self.status = "offline"
@@ -298,10 +300,21 @@ class RelayClient:
                         # a field that only appears when broken can never say
                         # "fixed". Truncated because it rides in a query string.
                         params["error"] = (fault or "")[:_FAULT_MAX_CHARS]
+                    telemetry = None
+                    try:
+                        if self.capture_provider is not None:
+                            capture = self.capture_provider()
+                            telemetry = {
+                                "episode_id": capture.get("buffer_episode_id"),
+                                "buffers": capture.get("buffer_stats", {}),
+                            }
+                    except Exception:
+                        pass  # telemetry must never interrupt device liveness
                     try:
                         async with session.post(
                             f"{self.base_url}/api/devices/heartbeat",
                             params=params,
+                            json=telemetry,
                             headers=self._headers(token),
                             timeout=aiohttp.ClientTimeout(total=10),
                         ):
