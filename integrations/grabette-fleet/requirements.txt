@@ -1,0 +1,5 @@
+fastapi>=0.110
+uvicorn[standard]>=0.27
+huggingface_hub[oauth]>=0.28
+pydantic>=2
+requests>=2.31

@@ -35,6 +35,9 @@ Group synchronization is deliberately best-effort. If the device isn't grouped, 
 
 ### Running your own
 
+To run the fleet on your computer with session-page recording-buffer telemetry,
+see the [local fleet instructions](../../integrations/grabette-fleet/README.md).
+
 One Space is one owner's fleet. To run yours, open the Space menu and **Duplicate this Space** — the OAuth setup is provisioned automatically — then point your devices at it:
 
 ```bash
