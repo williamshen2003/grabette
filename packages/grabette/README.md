@@ -162,6 +162,23 @@ and point `NTP=` at it (see the comments in `config/timesyncd-grabette.conf`).
 
 If the daemon logs `Using MockBackend` instead of `RPi hardware detected, using RpiBackend`, the venv setup didn't take — `make install-rpi` will fix it on a re-run.
 
+### Recording write buffers
+
+OAK depth uses a 256 MiB RAM write queue. OAK left/right and wrist H.264 video
+each use 16 MiB, for a maximum of 304 MiB of queued/in-flight payloads plus
+Python, camera, and codec overhead. These are allocated as frames arrive, not
+reserved upfront. Independent workers compress/write while capture continues;
+stopping waits for all accepted frames before finalizing the files.
+
+After recording, the device dashboard's Status box shows each queue's peak
+percentage and bytes used. These application queues are separate from the
+original DepthAI receive queues (8 depth frames and 32 frames per OAK video).
+Statistics persist in `metadata.json` under `buffers` and in the capture API.
+Queue overflow or a write error sets `recording_complete: false`, displays a
+warning, and preserves the affected raw recording rather than presenting it as
+a finalized dataset input. A low queue peak does not prove the sensor/SDK never
+dropped frames. The frame rates and depth compression setting are unchanged.
+
 ### Speaker: audible recording cue (`make install-audio`)
 
 Each grabette beeps at **both ends of a take** — the audible counterpart of the

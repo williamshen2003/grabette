@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class IMUSample(BaseModel):
@@ -18,6 +18,7 @@ class AngleSample(BaseModel):
 class CaptureStatus(BaseModel):
     is_capturing: bool = False
     is_starting: bool = False
+    is_stopping: bool = False
     episode_id: str | None = None  # id of the episode being / just captured
     duration_seconds: float = 0.0
     frame_count: int = 0
@@ -28,6 +29,10 @@ class CaptureStatus(BaseModel):
     # instead of "Idle" — a device that looks free while it is not is how a
     # recording gets started on top of one.
     blocked_reason: str = ""
+    # Last completed recording, retained while idle and after hardware re-init.
+    buffer_episode_id: str | None = None
+    buffer_stats: dict[str, dict] = Field(default_factory=dict)
+    recording_complete: bool = True
 
 
 class SensorState(BaseModel):

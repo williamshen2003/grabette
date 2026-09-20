@@ -6,13 +6,21 @@ from grabette.hardware.camera import VideoCapture
 from grabette.hardware.sync import SyncManager
 
 
-def test_timestamps_follow_saved_frames(tmp_path):
+def test_timestamps_follow_saved_frames(tmp_path, monkeypatch):
     sync = SyncManager()
     sync._start_time = 100.0
     sync._start_boottime = 100.0
     camera = VideoCapture(sync)
     encoder = SimpleNamespace(firsttimestamp=100_800_000)
     pts = None
+    output = SimpleNamespace(stop=Mock(), buffer=SimpleNamespace(stats=lambda: {"complete": True}))
+
+    def make_output(path, timestamps):
+        nonlocal pts
+        pts = timestamps
+        return output
+
+    monkeypatch.setattr('grabette.hardware.camera._buffered_output', make_output)
 
     def start_encoder(enc, path, **kwargs):
         nonlocal pts
@@ -23,7 +31,6 @@ def test_timestamps_follow_saved_frames(tmp_path):
                 callback(SimpleNamespace(get_metadata=lambda i=i: {
                     'SensorTimestamp': 100_000_000_000 + i * 20_000_000,
                 }))
-        pts = kwargs.get('pts')
         if pts is not None:
             # Only these frames made it to the video; the 20ms frame dropped.
             pts.write('0.000\n40.000\n')

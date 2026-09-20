@@ -128,7 +128,7 @@ class GrabetteClient:
 
     def stop_capture(self) -> dict:
         try:
-            r = self._http.post("/api/episodes/stop")
+            r = self._http.post("/api/episodes/stop", timeout=120.0)
             r.raise_for_status()
             return r.json()
         except httpx.HTTPStatusError as e:
@@ -330,4 +330,3 @@ class GrabetteClient:
             return r.json()
         except Exception:
             return {"mode": "offline", "ssid": None, "ip": None}
-

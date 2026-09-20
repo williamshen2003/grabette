@@ -39,11 +39,13 @@ import tempfile
 import threading
 import time
 from pathlib import Path
+from functools import partial
 
 import cv2
 import numpy as np
 
 from .sync import SyncManager
+from .recording_buffer import RecordingBuffer, DEPTH_BUFFER_BYTES, VIDEO_BUFFER_BYTES
 
 logger = logging.getLogger(__name__)
 
@@ -141,6 +143,7 @@ class OakdCapture:
         self._depth_ts: list[dict] = []
         self._imu_samples: list[dict] = []
         self._clock_pairs: list[dict] = []
+        self._recording_buffers: dict[str, RecordingBuffer] = {}
 
         # H.264 file handles, opened on start_recording, closed on stop_recording
         self._left_h264_path: Path | None = None
@@ -287,12 +290,12 @@ class OakdCapture:
         self._threads = [
             threading.Thread(
                 target=self._writer_loop_video,
-                args=(self._left_q, "left", "_left_h264_fp", self._left_ts),
+                args=(self._left_q, "left"),
                 daemon=True,
             ),
             threading.Thread(
                 target=self._writer_loop_video,
-                args=(self._right_q, "right", "_right_h264_fp", self._right_ts),
+                args=(self._right_q, "right"),
                 daemon=True,
             ),
             threading.Thread(
@@ -457,6 +460,17 @@ class OakdCapture:
         with self._files_lock:
             self._left_h264_fp = open(self._left_h264_path, "wb")
             self._right_h264_fp = open(self._right_h264_path, "wb")
+            self._recording_buffers = {
+                "oak_left": RecordingBuffer("oak_left", VIDEO_BUFFER_BYTES,
+                    partial(self._save_video, self._left_h264_fp, self._left_ts),
+                    self._left_h264_fp.close),
+                "oak_right": RecordingBuffer("oak_right", VIDEO_BUFFER_BYTES,
+                    partial(self._save_video, self._right_h264_fp, self._right_ts),
+                    self._right_h264_fp.close),
+            }
+            if self.enable_depth:
+                self._recording_buffers["depth"] = RecordingBuffer(
+                    "depth", DEPTH_BUFFER_BYTES, self._save_depth)
             self._recording = True
 
         logger.info("OakdCapture recording → %s", self._output_dir)
@@ -466,16 +480,14 @@ class OakdCapture:
         if not self._recording:
             return {}
 
-        # Flip flag first so drainers stop trying to write
+        # Flip flag first so drainers stop enqueueing.
         with self._files_lock:
             self._recording = False
-            for fp in (self._left_h264_fp, self._right_h264_fp):
-                try:
-                    if fp:
-                        fp.flush()
-                        fp.close()
-                except Exception:
-                    pass
+        # All producers use the flag under this lock. Drain accepted payloads
+        # before muxing, packing depth, or writing timestamp sidecars.
+        buffer_stats = {name: writer.close() for name, writer in self._recording_buffers.items()}
+        recording_complete = all(s["complete"] for s in buffer_stats.values())
+        with self._files_lock:
             self._left_h264_fp = None
             self._right_h264_fp = None
 
@@ -489,8 +501,8 @@ class OakdCapture:
             futures = [
                 ex.submit(self._mux_h264_to_mp4, self._left_h264_path, self._left_ts, "left"),
                 ex.submit(self._mux_h264_to_mp4, self._right_h264_path, self._right_ts, "right"),
-            ]
-            if self.enable_depth and self._output_dir:
+            ] if recording_complete else []
+            if self.enable_depth and self._output_dir and recording_complete:
                 # _pack_depth_video reads self._depth_ts + PNG dir; no dep on
                 # sidecar files or the mp4 muxes, so it's safe to run alongside.
                 futures.append(ex.submit(self._pack_depth_video))
@@ -523,13 +535,30 @@ class OakdCapture:
             "right_frames": len(self._right_ts),
             "depth_frames": len(self._depth_ts) if self.enable_depth else None,
             "imu_samples": len(self._imu_samples),
+            "buffers": buffer_stats,
+            "recording_complete": recording_complete,
         }
         logger.info("OakdCapture recording stopped: %s", stats)
         return stats
 
     # ---------------------------------------------------------------- writers
 
-    def _writer_loop_video(self, q, name: str, fp_attr: str, ts_buffer: list[dict]) -> None:
+    @staticmethod
+    def _save_video(fp, timestamps, payload):
+        data, sample = payload
+        if fp.write(data) != len(data):
+            raise OSError("Short video write")
+        timestamps.append(sample)
+
+    def _save_depth(self, payload):
+        depth, sample = payload
+        path = self._output_dir / "dcam_depth" / f"{sample['seq']:08d}.png"
+        if not cv2.imwrite(str(path), depth,
+                           [cv2.IMWRITE_PNG_COMPRESSION, self.depth_png_compression]):
+            raise OSError(f"Depth PNG write failed: {path.name}")
+        self._depth_ts.append(sample)
+
+    def _writer_loop_video(self, q, name: str) -> None:
         """Always pull from queue. Append to .h264 file only when recording.
 
         Recording is gated to begin on the first I-frame: the warm pipeline means
@@ -591,21 +620,20 @@ class OakdCapture:
                 })
 
             with self._files_lock:
-                fp = getattr(self, fp_attr, None)
-                if fp is not None and self._recording:
-                    fp.write(pkt.getData())
-                    ts_buffer.append({
+                if self._recording:
+                    data = bytes(pkt.getData())
+                    sample = {
                         "seq": int(seq),
                         "device_us": device_us,
                         "host_ms": host_ms,
-                    })
-                    n += 1
+                    }
+                    if self._recording_buffers[f"oak_{name}"].submit((data, sample), len(data)):
+                        n += 1
         logger.info("oakd %s writer: %d packets recorded", name, n)
 
     def _writer_loop_depth(self) -> None:
         """Always pull depth; cache latest for live view; PNG to disk when recording."""
         n = 0
-        png_params = [cv2.IMWRITE_PNG_COMPRESSION, self.depth_png_compression]
         warned_shape = False
         while True:
             try:
@@ -644,14 +672,14 @@ class OakdCapture:
             seq = frame.getSequenceNum()
             device_us = _device_us(frame.getTimestampDevice())
 
-            cv2.imwrite(
-                str(self._output_dir / "dcam_depth" / f"{seq:08d}.png"),
-                depth, png_params,
-            )
-            self._depth_ts.append({
+            sample = {
                 "seq": int(seq), "device_us": device_us, "host_ms": host_ms,
-            })
-            n += 1
+            }
+            with self._files_lock:
+                if self._recording:
+                    owned = depth.copy()
+                    if self._recording_buffers["depth"].submit((owned, sample), owned.nbytes):
+                        n += 1
         logger.info("oakd depth writer: %d frames recorded", n)
 
     def _writer_loop_imu(self) -> None:

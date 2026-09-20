@@ -99,6 +99,8 @@ class RpiBackend(Backend):
         # see hardware_error.
         self._hw_faults: dict[str, str] = {}
         self._episode_dir: Path | None = None
+        self._last_buffer_episode_id: str | None = None
+        self._last_buffer_stats: dict = {}
         self._enable_angle = enable_angle
         self._enable_oakd = enable_oakd
         self._oakd_keepalive_s = oakd_keepalive_s
@@ -637,6 +639,8 @@ class RpiBackend(Backend):
     async def stop_capture(self) -> CaptureStatus:
         if not self._capturing:
             raise RuntimeError("Not capturing")
+        if self._stopping:
+            raise RuntimeError("Capture is already being saved")
 
         self._starting = False
         # Mark stopping now (before the ~1-2s stream teardown + mux) so the LED
@@ -677,13 +681,9 @@ class RpiBackend(Backend):
         self._note_angle_output(angle_samples)
         t_phases["angle_stop"] = (time.monotonic() - _t) * 1000
 
-        # Finalize OAK and RPi camera concurrently. Both flip their "recording"
-        # flag immediately (capture stops at once) and then spend ~1-2s muxing
-        # H.264 → mp4. Running the OAK finalize in an executor while the camera
-        # finalize runs here overlaps the muxes (the OAK also muxes left/right
-        # in parallel internally), cutting the stop/save time to ~the single
-        # longest mux. Angle is already stopped above, so the "angle must stop
-        # before the camera mux" ordering still holds.
+        # Stop both cameras off the event loop: draining RAM queues and muxing
+        # may take longer than capture. The dashboard must keep polling while
+        # this happens. Angle acquisition has already stopped.
         import asyncio
         loop = asyncio.get_event_loop()
         _t_muxes = time.monotonic()
@@ -691,7 +691,9 @@ class RpiBackend(Backend):
         if self._oakd and self._oakd.is_recording:
             oakd_fut = loop.run_in_executor(None, self._oakd.stop_recording)
         _t_cam = time.monotonic()
-        frame_timestamps = self._camera.stop()
+        # The wrist output now drains a RAM queue too. Keep the event loop free
+        # to serve the dashboard's "Saving" state while both workers finish.
+        frame_timestamps = await loop.run_in_executor(None, self._camera.stop)
         t_phases["camera_stop"] = (time.monotonic() - _t_cam) * 1000
         self._needs_reinit = True  # camera is closed; flag before yielding to event loop
         oakd_stats = await oakd_fut if oakd_fut is not None else None
@@ -718,6 +720,11 @@ class RpiBackend(Backend):
             if video_span_ms > 0:
                 actual_fps = round((len(frame_timestamps) - 1) / (video_span_ms / 1000.0), 3)
 
+        self._last_buffer_stats = {
+            **(oakd_stats.get("buffers", {}) if oakd_stats else {}),
+            **getattr(self._camera, "buffer_stats", {}),
+        }
+        self._last_buffer_episode_id = self._episode_dir.name if self._episode_dir else None
         status = CaptureStatus(
             is_capturing=False,
             episode_id=self._episode_dir.name if self._episode_dir else None,
@@ -725,6 +732,9 @@ class RpiBackend(Backend):
             frame_count=self._camera.frame_count,
             imu_sample_count=oakd_stats.get("imu_samples", 0) if oakd_stats else 0,
             angle_sample_count=angle_count,
+            buffer_stats=self._last_buffer_stats,
+            buffer_episode_id=self._last_buffer_episode_id,
+            recording_complete=all(s["complete"] for s in self._last_buffer_stats.values()),
         )
 
         # Build the metadata dict now so all values are captured while state
@@ -738,6 +748,8 @@ class RpiBackend(Backend):
             "angle_sample_count": status.angle_sample_count,
             "fps": actual_fps,
             "backend": "rpi",
+            "buffers": status.buffer_stats,
+            "recording_complete": status.recording_complete,
             # Identity + convention tags — let downstream readers know which
             # device + handedness recorded this episode and which sign
             # convention the angle samples follow. Legacy episodes without
@@ -903,12 +915,16 @@ class RpiBackend(Backend):
         return CaptureStatus(
             is_capturing=self._capturing,
             is_starting=self._starting,
+            is_stopping=self._stopping,
             blocked_reason=self.hardware_error or self.busy_reason,
             episode_id=self._episode_dir.name if self._episode_dir else None,
             duration_seconds=round(duration, 2),
             frame_count=frame_count,
             imu_sample_count=imu_count,
             angle_sample_count=angle_count,
+            buffer_stats=self._last_buffer_stats,
+            buffer_episode_id=self._last_buffer_episode_id,
+            recording_complete=all(s["complete"] for s in self._last_buffer_stats.values()),
         )
 
     @property

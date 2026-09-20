@@ -10,8 +10,39 @@ import subprocess
 from pathlib import Path
 
 from .sync import SyncManager
+from .recording_buffer import RecordingBuffer, VIDEO_BUFFER_BYTES
 
 logger = logging.getLogger(__name__)
+
+
+def _buffered_output(path, pts):
+    # Import only on the Pi; FileOutput retains its keyframe gate and PTS format.
+    from picamera2.outputs import FileOutput
+
+    class BufferedOutput(FileOutput):
+        def __init__(self):
+            super().__init__(str(path), pts=pts)
+            self._stopped = False
+            self.buffer = RecordingBuffer("wrist", VIDEO_BUFFER_BYTES, self._save, self.close)
+
+        def _write(self, frame, timestamp=None):
+            data = bytes(frame)  # encoder buffers may be reused on return
+            self.buffer.submit((data, timestamp), len(data))
+
+        def _save(self, payload):
+            frame, timestamp = payload
+            if self.fileoutput.write(frame) != len(frame):
+                raise OSError("Short wrist video write")
+            self.fileoutput.flush()
+            self.outputtimestamp(timestamp)  # only successfully saved frames
+
+        def stop(self):
+            if not self._stopped:
+                self.recording = False
+                self.buffer.close()  # finish callback closes FileOutput, reporting errors
+                self._stopped = True
+
+    return BufferedOutput()
 
 
 class VideoCapture:
@@ -49,6 +80,8 @@ class VideoCapture:
         self._encoder_pts = io.StringIO()
         self._recording = False
         self._frame_count: int = 0
+        self._buffered_output = None
+        self.buffer_stats: dict = {}
 
     def init_camera(self) -> None:
         """Initialize picamera2 with CFR configuration."""
@@ -97,20 +130,31 @@ class VideoCapture:
         self._frame_timestamps = []
         self._frame_count = 0
         self._encoder_pts = io.StringIO()
+        self.buffer_stats = {}
+        self._buffered_output = _buffered_output(self._h264_path, self._encoder_pts)
 
         self._recording = True
         gc.disable()  # Prevent GC pauses from dropping frames during recording
-        self._picam2.start_encoder(
-            self._encoder, str(self._h264_path), pts=self._encoder_pts,
-        )
+        try:
+            self._picam2.start_encoder(self._encoder, self._buffered_output)
+        except Exception:
+            self._recording = False
+            gc.enable()
+            self._buffered_output.stop()
+            raise
 
     def stop(self) -> list[float]:
         if not self._recording:
             return self._frame_timestamps
 
         self._recording = False
-        self._picam2.stop_encoder()
-        gc.enable()
+        try:
+            self._picam2.stop_encoder()  # output.stop drains before closing file
+        finally:
+            gc.enable()
+            # Also drain if encoder teardown itself raised before output.stop.
+            self._buffered_output.stop()
+            self.buffer_stats = {"wrist": self._buffered_output.buffer.stats()}
         # FileOutput writes PTS only for saved frames, including the stop drain.
         # PTS is milliseconds relative to the encoder's first SensorTimestamp
         # (microseconds, CLOCK_BOOTTIME), not relative to recording start.
@@ -131,7 +175,10 @@ class VideoCapture:
         self._frame_timestamps = [
             origin_ms + float(pts) for pts in self._encoder_pts.getvalue().splitlines()
         ]
-        self._mux_to_mp4()
+        if self.buffer_stats["wrist"]["complete"]:
+            self._mux_to_mp4()
+        else:
+            logger.error("Incomplete wrist recording; preserving raw H.264")
         return self._frame_timestamps
 
     def _mux_to_mp4(self) -> None:

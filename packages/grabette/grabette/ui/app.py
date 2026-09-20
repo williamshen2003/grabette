@@ -16,6 +16,24 @@ from grabette.ui.api_client import GrabetteClient
 logger = logging.getLogger(__name__)
 
 
+def buffer_summary(capture: dict) -> str:
+    """Last completed recording's application RAM queues, not SDK/OS buffers."""
+    stats = capture.get("buffer_stats") or {}
+    if not stats:
+        return ""
+    labels = {"depth": "Depth", "oak_left": "OAK left video",
+              "oak_right": "OAK right video", "wrist": "Wrist video"}
+    lines = [f"Last recording: {capture.get('buffer_episode_id') or 'unknown'}",
+             "Peak RAM write-buffer utilization:"]
+    for name, s in stats.items():
+        lines.append(f"{labels.get(name, name)}: {s['peak_percent']:.1f}% "
+                     f"({s['peak_bytes'] / 1024**2:.1f} / {s['capacity_bytes'] / 1024**2:.0f} MiB)")
+        if not s["complete"]:
+            lines.append(f"WARNING: recording incomplete; {s['rejected_frames']} rejected frames, "
+                         f"{s['write_errors']} write errors. {s.get('error', '')}")
+    return "\n".join(lines)
+
+
 MODAL_CSS = """
 #hf-auth-modal {
     position: fixed !important;
@@ -364,6 +382,8 @@ def create_ui(api_url: str | None = None) -> gr.Blocks:
         if state is None:
             return "○ Idle"
         cap = state.get("capture", {})
+        if cap.get("is_stopping", False):
+            return "Saving recording: draining RAM write buffers…"
         if cap.get("is_capturing", False):
             parts = [
                 f"● RECORDING  {cap.get('episode_id', '')}",
@@ -378,8 +398,8 @@ def create_ui(api_url: str | None = None) -> gr.Blocks:
         # precisely the reading that gets a recording started on top of one.
         blocked = cap.get("blocked_reason") or ""
         if blocked:
-            return f"⛔ Cannot record — {blocked}"
-        return "○ Idle"
+            return f"⛔ Cannot record — {blocked}\n{buffer_summary(cap)}".strip()
+        return f"○ Idle\n{buffer_summary(cap)}".strip()
 
     def on_toggle_capture(session_id):
         state = client.get_state()
@@ -934,7 +954,7 @@ def create_ui(api_url: str | None = None) -> gr.Blocks:
                 capture_title = gr.Markdown("### Capture")
                 with gr.Row():
                     capture_box = gr.Textbox(
-                        label="Status", lines=2, interactive=False, scale=3,
+                        label="Status", lines=8, interactive=False, scale=3,
                     )
                     with gr.Column(scale=1, min_width=150):
                         session_btn = gr.Button("▶ Start Session", variant="secondary")
@@ -1065,7 +1085,10 @@ def create_ui(api_url: str | None = None) -> gr.Blocks:
                 desc_update = gr.skip()
 
             # Build status text and toggle button state
-            if is_starting:
+            if cap.get("is_stopping", False):
+                status = "Saving recording: draining RAM write buffers…"
+                toggle_btn_update = gr.update(interactive=False, value="Saving…", variant="secondary")
+            elif is_starting:
                 status = "◌ Initializing depth camera…"
                 toggle_btn_update = gr.update(interactive=False, value="Start Capture", variant="primary")
             elif is_recording:
@@ -1079,7 +1102,7 @@ def create_ui(api_url: str | None = None) -> gr.Blocks:
                 status = "\n".join(parts)
                 toggle_btn_update = gr.update(interactive=True, value="Stop Capture", variant="stop")
             else:
-                status = "○ Idle"
+                status = f"○ Idle\n{buffer_summary(cap)}".strip()
                 toggle_btn_update = gr.update(interactive=True, value="Start Capture", variant="primary")
 
             # Session button + capture title + banner sync
