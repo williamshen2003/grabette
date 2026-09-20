@@ -231,6 +231,13 @@ def build_dataset(
         df = load_trajectory_csv(traj_path)
         traj_ts = df['timestamp'].values.astype(np.float64)
         n_frames = len(df)
+        if (n_frames == 0 or not np.isfinite(traj_ts).all()
+                or np.any(np.diff(traj_ts) <= 0)
+                or np.any(np.diff(traj_ts) > 1.5 / fps)
+                or (n_frames > 1 and abs(traj_ts[-1] - traj_ts[0] - (n_frames - 1) / fps) > 1 / fps)):
+            raise ValueError(f"{ep_dir}: trajectory timing cannot be represented at {fps:g} fps "
+                             "without changing elapsed time; reconstruct on a uniform timeline "
+                             "and mark unsupported poses before building")
         actions = _episode_actions(df, traj_ts, ep_dir)
         # Per-frame SLAM tracking-lost flag, aligned with the action rows.
         is_lost = df['is_lost'].astype(np.float32).values
@@ -256,8 +263,8 @@ def build_dataset(
             oak_img = cam1_cache.get(cam1_indices[i])
             if img is None or oak_img is None:
                 which = "RPi" if img is None else "OAK left"
-                print(f"  Warning: missing {which} frame at step {i}, t={traj_ts[i]:.3f}s")
-                break
+                raise ValueError(f"{ep_dir}: missing {which} frame at step {i}, t={traj_ts[i]:.3f}s; "
+                                 "refusing to save a truncated episode")
             img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
             oak_rgb = cv2.cvtColor(oak_img, cv2.COLOR_BGR2RGB)
 

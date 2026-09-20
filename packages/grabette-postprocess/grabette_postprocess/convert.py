@@ -16,10 +16,10 @@ file instead of ~600 PNGs, ~2× smaller, and bit-identical once decoded, so the
 SLAM input is unchanged. Older recordings with a dcam_depth/ PNG directory are
 still accepted.
 
-Frame matching: left timestamps and depth timestamps share a seq number
-(both come from the same StereoDepth node). We take seqs present in both,
-in seq order, and assign consecutive idx = 0..N-1. mp4 frames are decoded
-in encoding order (= seq order); we trim to whichever stream is shortest.
+Frame matching: left timestamps and depth timestamps share a seq number.
+Only matching sequences are used, retaining each video's original frame index
+and capture time. Video/timestamp count mismatches require explicit repair;
+trimming blindly can associate an image with the wrong depth or timestamp.
 
 Timestamps in the output CSVs are in nanoseconds. Camera frames keep their
 host_ms stamps — the clock the SLAM trajectory (and the downstream Arducam
@@ -104,6 +104,7 @@ def _extract_mp4_frames(mp4_path: Path, out_dir: Path) -> int:
         "-i", str(mp4_path),
         *_FFMPEG_PNG_THREADS,
         "-pix_fmt", "gray",
+        "-fps_mode", "passthrough",
         "-start_number", "0",
         str(out_dir / "%06d.png"),
     ]
@@ -122,6 +123,7 @@ def _extract_depth_video(mkv_path: Path, out_dir: Path) -> int:
         "ffmpeg", "-y", "-loglevel", "error",
         "-i", str(mkv_path),
         *_FFMPEG_PNG_THREADS,
+        "-fps_mode", "passthrough",
         "-start_number", "0",
         str(out_dir / "%06d.png"),
     ]
@@ -174,6 +176,8 @@ def _split_imu_to_csvs(imu_json: Path, oak_dir: Path,
 def convert_episode(ep_dir: Path, force: bool = False) -> Path:
     oak_dir = ep_dir / "oak"
     if oak_dir.exists() and not force:
+        if not (oak_dir / "conversion_report.json").is_file():
+            raise ValueError(f"Incomplete or outdated conversion at {oak_dir}; rerun with force=True")
         print(f"  oak/ already exists at {oak_dir} (use --force to overwrite)")
         return oak_dir
     if force and oak_dir.exists():
@@ -203,51 +207,45 @@ def convert_episode(ep_dir: Path, force: bool = False) -> Path:
         raise FileNotFoundError(
             f"Missing depth: neither {depth_mkv} nor {depth_dir}")
 
-    oak_dir.mkdir(parents=True)
-    (oak_dir / "frames").mkdir()
-    (oak_dir / "depth").mkdir()
-
-    # --- Calib (already in expected schema) ---
-    shutil.copyfile(calib_src, oak_dir / "calib_offline.json")
-
     # --- Build (seq, host_ms) pairs that exist in BOTH left and depth ---
     left_ts = json.loads(left_ts_json.read_text())["samples"]
     depth_ts = json.loads(depth_ts_json.read_text())["samples"]
+    for name, samples in (("left", left_ts), ("depth", depth_ts)):
+        seqs = [int(s["seq"]) for s in samples]
+        times = [float(s["host_ms"]) for s in samples]
+        if (not seqs or any(b <= a for a, b in zip(seqs, seqs[1:]))
+                or not np.isfinite(times).all()
+                or any(b <= a for a, b in zip(times, times[1:]))):
+            raise ValueError(f"{ep_dir}: {name} sequences/timestamps must be finite and strictly increasing")
     # device→host fit from the frame stream: lets the IMU below ride the same
     # host timeline as the frames (removes the false camera-IMU offset).
     dev_to_host_s = fit_device_to_host_s(left_ts)
     depth_seqs = {int(d["seq"]): d for d in depth_ts}
     matched = [
-        (int(l["seq"]), float(l["host_ms"]))
-        for l in left_ts if int(l["seq"]) in depth_seqs
+        (i, int(l["seq"]), float(l["host_ms"]))
+        for i, l in enumerate(left_ts) if int(l["seq"]) in depth_seqs
     ]
-    matched.sort(key=lambda x: x[0])  # ascending seq
+    if not matched:
+        raise ValueError(f"{ep_dir}: no matching camera/depth sequences")
 
     # --- Extract mp4 frames ---
     with tempfile.TemporaryDirectory() as tmp:
         tmp_frames = Path(tmp) / "frames"
         n_mp4 = _extract_mp4_frames(left_mp4, tmp_frames)
 
-        # Trim to min of (matched pairs, decoded mp4 frames)
-        n = min(len(matched), n_mp4)
-        if n < len(matched):
-            print(f"  WARNING: trimming {len(matched)-n} pairs (mp4 has {n_mp4} frames)")
-        if n < n_mp4:
-            print(f"  WARNING: ignoring {n_mp4-n} extra mp4 frames (no matching depth)")
-
-        # Move to oak/frames/<idx>.png. shutil.move() (not Path.rename()) so
-        # it works when tmp_frames is on tmpfs and oak_dir is on disk —
-        # rename() raises EXDEV across filesystems.
-        for idx in range(n):
-            shutil.move(str(tmp_frames / f"{idx:06d}.png"),
-                        str(oak_dir / "frames" / f"{idx:06d}.png"))
+        if n_mp4 != len(left_ts):
+            raise ValueError(f"{ep_dir}: left video has {n_mp4} frames but {len(left_ts)} timestamps; "
+                             "repair the source mapping before conversion")
 
         # Resolve each depth seq to a source PNG. For the video format, decode
         # it once to temp PNGs; frame i ↔ depth_ts[i].seq (encode order). For
         # the legacy dir format, the PNG is named by seq.
         if depth_mkv.is_file():
             tmp_depth = Path(tmp) / "depth"
-            _extract_depth_video(depth_mkv, tmp_depth)
+            n_depth = _extract_depth_video(depth_mkv, tmp_depth)
+            if n_depth != len(depth_ts):
+                raise ValueError(f"{ep_dir}: depth video has {n_depth} frames but {len(depth_ts)} timestamps; "
+                                 "repair the source mapping before conversion")
             seq_to_png = {
                 int(s["seq"]): tmp_depth / f"{i:06d}.png"
                 for i, s in enumerate(depth_ts)
@@ -258,17 +256,25 @@ def convert_episode(ep_dir: Path, force: bool = False) -> Path:
                 for s in depth_ts
             }
 
-        # Copy matched depth frames → oak/depth/<idx>.png
-        for idx, (seq, _) in enumerate(matched[:n]):
-            depth_png = seq_to_png.get(seq)
-            if depth_png is None or not depth_png.exists():
-                raise FileNotFoundError(f"depth frame missing for seq {seq}")
+        missing = [seq for seq, path in seq_to_png.items() if not path.is_file()]
+        if missing:
+            raise ValueError(f"{ep_dir}: depth frames missing for sequences {missing[:10]}")
+
+        oak_dir.mkdir(parents=True)
+        (oak_dir / "frames").mkdir()
+        (oak_dir / "depth").mkdir()
+        shutil.copyfile(calib_src, oak_dir / "calib_offline.json")
+        n = len(matched)
+        for idx, (source_idx, seq, _) in enumerate(matched):
+            shutil.move(str(tmp_frames / f"{source_idx:06d}.png"),
+                        str(oak_dir / "frames" / f"{idx:06d}.png"))
+            depth_png = seq_to_png[seq]
             shutil.copyfile(depth_png, oak_dir / "depth" / f"{idx:06d}.png")
 
         # --- Write timestamps.csv (idx, ns) ---
         with (oak_dir / "timestamps.csv").open("w") as f:
             f.write("idx,timestamp_ns\n")
-            for idx, (_, host_ms) in enumerate(matched[:n]):
+            for idx, (_, _, host_ms) in enumerate(matched):
                 f.write(f"{idx},{_ms_to_ns(host_ms)}\n")
 
     # --- Split IMU JSON → imu_acc.csv + imu_gyro.csv + imu_rotation.csv ---
@@ -281,4 +287,10 @@ def convert_episode(ep_dir: Path, force: bool = False) -> Path:
               f"{n_rot} rotation samples (IMU clock: {clk})")
     else:
         print(f"  oak/ written: {n} frames, no IMU (IMU-less camera)")
+    # Written last: a failed conversion must never be reused as a valid cache.
+    (oak_dir / "conversion_report.json").write_text(json.dumps({
+        "left_frames": len(left_ts), "depth_frames": len(depth_ts), "matched_frames": n,
+        "unmatched_left_sequences": [int(s["seq"]) for s in left_ts
+                                     if int(s["seq"]) not in depth_seqs],
+    }, indent=2))
     return oak_dir

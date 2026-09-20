@@ -113,6 +113,26 @@ def _check_depth(ep_dir: Path, status: dict) -> None:
         err.append("missing depth (dcam_depth.mkv or non-empty dcam_depth/)")
     if not n_ts:
         err.append("dcam_depth_timestamps.json missing or empty")
+    if has_mkv and n_ts:
+        try:
+            with av.open(str(depth_mkv)) as container:
+                # The recorder uses FFV1: one packet per depth frame. Demuxing
+                # checks the whole count without decoding every depth image.
+                stream = container.streams.video[0]
+                if stream.codec_context.name == "ffv1":
+                    n_frames = sum(1 for packet in container.demux(stream) if packet.size)
+                else:
+                    n_frames = sum(1 for _ in container.decode(stream))
+            if n_frames != n_ts:
+                err.append(f"{depth_mkv.name}: {n_frames} frames but {n_ts} timestamps; "
+                           "repair the source mapping before SLAM")
+        except Exception as e:
+            err.append(f"{depth_mkv.name} unreadable: {e}")
+    elif has_dir and n_ts:
+        missing = [s["seq"] for s in _samples(depth_ts)
+                   if not (depth_dir / f'{int(s["seq"]):08d}.png').is_file()]
+        if missing:
+            err.append(f"depth frames missing for sequences {missing[:10]}")
 
 
 def _check_seq_overlap(ep_dir: Path, status: dict) -> None:

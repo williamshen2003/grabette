@@ -62,7 +62,7 @@ def test_build_dataset_roundtrip(tmp_path):
 
     # Reload the produced dataset and assert schema + counts + values.
     from lerobot.datasets import LeRobotDataset
-    ds = LeRobotDataset(repo_id, root=root)
+    ds = LeRobotDataset(repo_id, root=root, video_backend="pyav")
 
     feats = ds.meta.features
     assert feats["observation.images.cam0"]["dtype"] == "video"
@@ -79,3 +79,12 @@ def test_build_dataset_roundtrip(tmp_path):
     action = np.asarray(sample["action"]).ravel()
     assert action.shape == (8,)
     np.testing.assert_allclose(action[:6], 0.0, atol=1e-5)  # first pose = origin+identity
+
+
+def test_dataset_refuses_to_compress_a_trajectory_gap(tmp_path):
+    ep = _make_episode(tmp_path / 'ep0')
+    trajectory = pd.read_csv(ep / 'camera_trajectory.csv')
+    trajectory['timestamp'] = [0, .033, .666, .700]
+    trajectory.to_csv(ep / 'camera_trajectory.csv', index=False)
+    with pytest.raises(ValueError, match='timing'):
+        build_dataset('test/gapped', [ep], task='pick', fps=30, root=tmp_path / 'ds')

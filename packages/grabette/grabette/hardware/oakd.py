@@ -844,14 +844,23 @@ class OakdCapture:
                 ]
                 result = subprocess.run(cmd, capture_output=True, text=True)
             if result.returncode != 0:
-                logger.error("depth pack ffmpeg failed: %s", result.stderr[-300:])
-                if out.exists():
-                    out.unlink()
-                return
-            shutil.rmtree(depth_dir)
-            logger.info("oakd depth packed → %s (%d frames)", out.name, len(self._depth_ts))
+                raise RuntimeError(f"depth pack ffmpeg failed: {result.stderr[-300:]}")
+            # FFmpeg can exit successfully after skipping a damaged PNG. FFV1
+            # stores one packet per frame; check before deleting the originals.
+            probe = subprocess.run([
+                "ffprobe", "-v", "error", "-count_packets", "-select_streams", "v:0",
+                "-show_entries", "stream=nb_read_packets", "-of", "csv=p=0", str(out),
+            ], capture_output=True, text=True, timeout=120)
+            count = probe.stdout.strip()
+            if probe.returncode or not count.isdigit() or int(count) != len(self._depth_ts):
+                raise RuntimeError(f"depth pack frame mismatch: {count or 'unreadable'} frames, "
+                                   f"{len(self._depth_ts)} timestamps")
         except Exception as e:
             logger.warning("depth pack failed (%s) — keeping PNGs", e)
+            out.unlink(missing_ok=True)  # converters must use the retained PNGs
+            return
+        shutil.rmtree(depth_dir)
+        logger.info("oakd depth packed → %s (%d frames)", out.name, len(self._depth_ts))
 
     def shutdown(self) -> None:
         """Stop the pipeline and exit all drainer threads."""

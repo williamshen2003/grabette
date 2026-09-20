@@ -184,3 +184,22 @@ def test_right_expected_when_metadata_absent(tmp_path):
 def test_explicit_require_right_false_still_overrides(tmp_path):
     st = check_recording(_episode(tmp_path, {"right_frames": 229}), require_right=False)
     assert not _right_warned(st)
+
+
+def test_depth_timestamp_count_mismatch_is_reported_before_slam(tmp_path):
+    import av
+    import numpy as np
+    from grabette_postprocess.checks.recording import _check_depth
+    with av.open(str(tmp_path / 'dcam_depth.mkv'), 'w') as output:
+        stream = output.add_stream('ffv1', rate=50)
+        stream.width = stream.height = 16
+        stream.pix_fmt = 'gray16le'
+        frame = av.VideoFrame.from_ndarray(np.ones((16, 16), np.uint16), format='gray16le')
+        for packet in stream.encode(frame):
+            output.mux(packet)
+        for packet in stream.encode():
+            output.mux(packet)
+    _write(tmp_path / 'dcam_depth_timestamps.json', {'samples': [{'seq': 1}, {'seq': 2}]})
+    status = _status()
+    _check_depth(tmp_path, status)
+    assert any('1 frames' in e and '2 timestamps' in e for e in status['errors'])

@@ -250,3 +250,23 @@ def test_backend_saving_keeps_event_loop_live_and_persists_stats(tmp_path, monke
     assert metadata[0]['buffers'] == stats and not metadata[0]['recording_complete']
     backend._camera = None  # camera re-init must not erase the last recording
     assert backend.get_capture_status().buffer_stats == stats
+
+
+@pytest.mark.parametrize('corrupt_last', [False, True])
+def test_depth_pack_verifies_count_before_deleting_pngs(tmp_path, corrupt_last):
+    import cv2
+    import shutil
+    if not shutil.which('ffmpeg') or not shutil.which('ffprobe'):
+        pytest.skip('ffmpeg and ffprobe required')
+    cap = OakdCapture(SimpleNamespace(is_started=True))
+    cap._output_dir = tmp_path
+    cap._depth_ts = [{'seq': 1}, {'seq': 2}]
+    depth = tmp_path / 'dcam_depth'
+    depth.mkdir()
+    for seq in (1, 2):
+        cv2.imwrite(str(depth / f'{seq:08d}.png'), np.ones((16, 16), np.uint16))
+    if corrupt_last:
+        (depth / '00000002.png').write_bytes(b'broken PNG')
+    cap._pack_depth_video()
+    assert depth.exists() == corrupt_last
+    assert (tmp_path / 'dcam_depth.mkv').exists() != corrupt_last

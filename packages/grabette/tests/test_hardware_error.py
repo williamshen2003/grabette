@@ -294,21 +294,44 @@ def test_the_fault_clears_once_the_calibration_reads(monkeypatch, tmp_path):
     assert b.hardware_error == ""
 
 
-def test_a_plain_missing_oakd_is_not_a_fault(monkeypatch):
-    # A bench setup with no OAK-D attached keeps working as before: only an
-    # unusable CALIBRATION is treated as a fault.
+@pytest.mark.parametrize("operation", ["prepare_capture", "start_capture"])
+@pytest.mark.parametrize("error", [RuntimeError("No available devices"), OSError("USB connection failed")])
+def test_camera_init_failure_blocks_capture_and_can_recover(monkeypatch, tmp_path, operation, error):
+    from unittest.mock import Mock
     from grabette.hardware import oakd as oakd_mod
-
-    def _boom(sync, *, fps):
-        raise RuntimeError("no device found")
-
-    monkeypatch.setattr(oakd_mod, "OakdCapture", _boom)
     from grabette.backend import rpi
+
+    camera = Mock(is_initialized=False)
+    camera.init_device.side_effect = error
+    monkeypatch.setattr(oakd_mod, "OakdCapture", lambda *a, **kw: camera)
     b = rpi.RpiBackend()
+    b._sync = Mock()
+    b._camera = Mock()
+    episode = tmp_path / "episode"
 
-    b._init_oakd()
+    def attempt():
+        method = getattr(b, operation)
+        asyncio_run(method(episode) if operation == "start_capture" else method())
 
+    with pytest.raises(RuntimeError, match=str(error)):
+        attempt()
+
+    assert str(error) in b.hardware_error
+    assert not b.is_capturing
+    assert not b.is_starting
+    assert not episode.exists()
+    b._sync.start.assert_not_called()
+    b._camera.start_recording.assert_not_called()
+    camera.start_recording.assert_not_called()
+
+    # The next attempt retries initialization and clears the same fault.
+    camera.init_device.side_effect = lambda: setattr(camera, "is_initialized", True)
+    attempt()
     assert b.hardware_error == ""
+    if operation == "start_capture":
+        assert b.is_capturing
+        camera.start_recording.assert_called_once_with(episode)
+        b._camera.start_recording.assert_called_once_with(episode / "raw_video.mp4")
 
 
 def asyncio_run(coro):

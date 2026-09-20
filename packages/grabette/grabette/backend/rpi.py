@@ -168,14 +168,11 @@ class RpiBackend(Backend):
         absent on an OAK-D-only device; importing oakd is free either way, since
         that module only pulls depthai inside its own functions.
 
-        A missing/unusable OAK-D offline calibration is singled out from every
-        other init failure: the device is reachable, so it looks healthy, yet
-        every episode it records is unconvertible (the SLAM Space rejects them
-        with "missing dcam_calib_offline.json"). That one is latched as a
-        hardware error, which refuses capture and blinks the error pattern.
-        Other failures keep the historical behaviour (log + carry on without the
-        camera) so a deliberately camera-less bench setup still works. The
-        Gemini has no equivalent fault: it derives its calibration on the host.
+        Every initialization failure blocks capture: continuing without the
+        camera creates episodes without depth, calibration or IMU files. The
+        fault is visible to the dashboard and LED, and a later successful
+        initialization clears it. Calibration failures retain their specific
+        recovery message.
         """
         from grabette.hardware.oakd import OakdCalibrationError, OakdCapture
         try:
@@ -199,11 +196,16 @@ class RpiBackend(Backend):
             ))
             logger.error("OAK-D calibration unusable — recording disabled: %s", e)
         except Exception as e:
-            logger.warning(
-                "Depth camera (%s) not available, continuing without it: %s",
+            self._oakd = None
+            self._set_hw_error(_HW_OAKD, (
+                f"Depth camera ({self._depth_camera}) failed to initialize: {_exc_text(e)}. "
+                "Recording is disabled because required camera files would be missing. "
+                "Check camera power and connection, then retry."
+            ))
+            logger.exception(
+                "Depth camera (%s) initialization failed — recording disabled: %s",
                 self._depth_camera, e,
             )
-            self._oakd = None
 
     def _init_speaker(self) -> None:
         """Resolve the HAT codec + pre-render the capture-start beep. Purely
@@ -552,10 +554,10 @@ class RpiBackend(Backend):
 
             # Auto-connect the OAK-D if it's currently off — recording without
             # depth/IMU is rarely what the user wants, and this matches the UI
-            # convention that toggling on/off is the "intent" flag. Errors during
-            # init are logged inside _init_oakd and leave _oakd=None; the rest
-            # of start_capture handles that gracefully. We then own its power and
-            # will auto-power-down after the keep-alive window once capture stops.
+            # convention that toggling on/off is the "intent" flag. Init errors
+            # latch a hardware fault, checked below before any streams start.
+            # We then own its power and auto-power-down after the keep-alive
+            # window once capture stops.
             # BUSY is refused first, before any hardware work: an OAK-D cold
             # boot is ~10s of CPU, and doing it for a recording we are about to
             # refuse would spend exactly the cycles the busy gate exists to
@@ -1002,8 +1004,8 @@ class RpiBackend(Backend):
     def hardware_error(self) -> str:
         """Why this grabette must not record right now ("" = fine).
 
-        Set by _init_oakd (no OAK-D offline calibration) and _init_angle_sensors
-        / stop_capture (no gripper angle data). Read by start_capture and
+        Set by _init_oakd (camera initialization or calibration failure) and
+        _init_angle_sensors / stop_capture (no gripper angle data). Read by start_capture and
         prepare_capture (which refuse) and by the button listener's LED monitor
         (which blinks the error pattern), so a fault is visible on the device
         itself and not only in the logs. Every live fault is reported, in a fixed
