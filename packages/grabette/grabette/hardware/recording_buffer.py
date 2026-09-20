@@ -5,7 +5,7 @@ import threading
 from collections import deque
 
 logger = logging.getLogger(__name__)
-DEPTH_BUFFER_BYTES = 256 * 1024 * 1024
+DEPTH_BUFFER_BYTES = 1024 * 1024 * 1024
 VIDEO_BUFFER_BYTES = 16 * 1024 * 1024
 
 

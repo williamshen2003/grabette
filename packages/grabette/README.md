@@ -164,11 +164,13 @@ If the daemon logs `Using MockBackend` instead of `RPi hardware detected, using 
 
 ### Recording write buffers
 
-OAK depth uses a 256 MiB RAM write queue. OAK left/right and wrist H.264 video
-each use 16 MiB, for a maximum of 304 MiB of queued/in-flight payloads plus
+OAK depth uses a 1 GiB (1024 MiB) RAM write queue. OAK left/right and wrist H.264 video
+each use 16 MiB, for a maximum of 1072 MiB of queued/in-flight payloads plus
 Python, camera, and codec overhead. These are allocated as frames arrive, not
 reserved upfront. Independent workers compress/write while capture continues;
 stopping waits for all accepted frames before finalizing the files.
+The larger queue absorbs longer write stalls; it still fills if recording
+continuously produces depth frames faster than they can be compressed and saved.
 
 After recording, the device dashboard's Status box shows each queue's peak
 percentage and bytes used. These application queues are separate from the
