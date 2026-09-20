@@ -97,7 +97,7 @@ class OakdCapture:
     DEFAULT_IMU_HZ = 200
     DEFAULT_BITRATE_BPS = 8_000_000
     DEFAULT_KEYFRAME_EVERY = 30
-    DEFAULT_DEPTH_PNG_COMPRESSION = 0
+    DEFAULT_DEPTH_PNG_COMPRESSION = 1
 
     # Depth visualization range (mm) for live JPEG preview
     PREVIEW_DEPTH_MIN_MM = 200
