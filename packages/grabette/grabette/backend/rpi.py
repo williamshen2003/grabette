@@ -101,6 +101,8 @@ class RpiBackend(Backend):
         self._episode_dir: Path | None = None
         self._last_buffer_episode_id: str | None = None
         self._last_buffer_stats: dict = {}
+        self.auto_stop_reason = ""
+        self.auto_stop_episode_id = None
         self._enable_angle = enable_angle
         self._enable_oakd = enable_oakd
         self._oakd_keepalive_s = oakd_keepalive_s
@@ -599,6 +601,8 @@ class RpiBackend(Backend):
                 )
 
             self._episode_dir = episode_dir
+            self.auto_stop_reason = ""
+            self.auto_stop_episode_id = None
 
             # Set flag BEFORE starting streams so the daemon poll loop
             # (get_state) reads from capture buffers instead of doing
@@ -735,6 +739,8 @@ class RpiBackend(Backend):
             buffer_stats=self._last_buffer_stats,
             buffer_episode_id=self._last_buffer_episode_id,
             recording_complete=all(s["complete"] for s in self._last_buffer_stats.values()),
+            auto_stop_reason=self.auto_stop_reason,
+            auto_stop_episode_id=self.auto_stop_episode_id,
         )
 
         # Build the metadata dict now so all values are captured while state
@@ -750,6 +756,7 @@ class RpiBackend(Backend):
             "backend": "rpi",
             "buffers": status.buffer_stats,
             "recording_complete": status.recording_complete,
+            "auto_stop_reason": status.auto_stop_reason,
             # Identity + convention tags — let downstream readers know which
             # device + handedness recorded this episode and which sign
             # convention the angle samples follow. Legacy episodes without
@@ -899,6 +906,22 @@ class RpiBackend(Backend):
             self._init_angle_sensors()
         self._needs_reinit = False
 
+    def buffer_pressure(self) -> str:
+        """Stop with headroom, before a full queue has to reject the next frame."""
+        if not self._capturing or self._starting or self._stopping:
+            return ""
+        buffers = dict(getattr(self._oakd, "_recording_buffers", {}))
+        output = getattr(self._camera, "_buffered_output", None)
+        if output is not None:
+            buffers["wrist"] = output.buffer
+        for name, writer in buffers.items():
+            stats = writer.stats()
+            if stats["rejected_frames"]:
+                return f"{name} buffer full; recording stopped automatically after frame rejection"
+            if stats["pending_bytes"] >= stats["capacity_bytes"] * .95:
+                return f"{name} buffer nearly full (95% limit); recording stopped automatically"
+        return ""
+
     def get_capture_status(self) -> CaptureStatus:
         duration = 0.0
         if self._capturing and self._sync and self._sync.is_started:
@@ -925,6 +948,8 @@ class RpiBackend(Backend):
             buffer_stats=self._last_buffer_stats,
             buffer_episode_id=self._last_buffer_episode_id,
             recording_complete=all(s["complete"] for s in self._last_buffer_stats.values()),
+            auto_stop_reason=self.auto_stop_reason,
+            auto_stop_episode_id=self.auto_stop_episode_id,
         )
 
     @property

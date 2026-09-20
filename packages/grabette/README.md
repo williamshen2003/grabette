@@ -171,6 +171,11 @@ reserved upfront. Independent workers compress/write while capture continues;
 stopping waits for all accepted frames before finalizing the files.
 The larger queue absorbs longer write stalls; it still fills if recording
 continuously produces depth frames faster than they can be compressed and saved.
+The device checks queue pressure every 20 ms and automatically stops at 95%
+usage, leaving headroom for shutdown. Accepted frames drain before finalizing;
+the fleet is notified concurrently to stop the paired device. This works with
+the dashboard closed. Peer stopping remains best-effort if the network is down.
+The stop reason is saved in episode metadata and shown in dashboard telemetry.
 
 After recording, the device dashboard's Status box shows each queue's peak
 percentage and bytes used. These application queues are separate from the

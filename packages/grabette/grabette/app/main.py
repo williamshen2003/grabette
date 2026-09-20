@@ -1060,6 +1060,12 @@ async def _dispatch_relay_command(cmd: dict) -> dict:
         if outcome == "cancelled":
             tm.discard_pending_episode()
             return {"status": "cancelled"}
+        if getattr(backend, "is_stopping", False):
+            # A peer stop can arrive while this device's buffer guard is already
+            # draining. Acknowledge only after saving, without stopping twice.
+            while backend.is_stopping:
+                await asyncio.sleep(.05)
+            return {"status": "ok", "result": backend.get_capture_status().model_dump()}
         if not backend.is_capturing:
             return {"status": "error", "message": "not capturing"}
 
@@ -1089,6 +1095,29 @@ async def _dispatch_relay_command(cmd: dict) -> dict:
     return {"status": "error", "message": f"unknown command '{ctype}'"}
 
 
+async def _stop_on_buffer_pressure(backend, task_manager):
+    reason = getattr(backend, "buffer_pressure", lambda: "")()
+    if not reason:
+        return
+    from grabette.fleet_sync import notify_group_stop
+    from grabette.capture_scheduler import get_capture_scheduler
+
+    episode_id = backend.get_capture_status().episode_id
+    backend.auto_stop_reason = reason
+    backend.auto_stop_episode_id = episode_id
+    logger.warning("Automatic recording stop: %s", reason)
+    # Send the peer stop concurrently: a network outage must not delay the
+    # local capture shutdown while its RAM queue is almost full.
+    notify = asyncio.create_task(notify_group_stop(should_abort=lambda:
+        get_capture_scheduler().is_scheduled() or
+        (backend.is_capturing and backend.get_capture_status().episode_id != episode_id)))
+    try:
+        result = await backend.stop_capture()
+        task_manager.register_episode(result.episode_id)
+    finally:
+        await notify
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _daemon, _button_listener
@@ -1103,6 +1132,19 @@ async def lifespan(app: FastAPI):
     # with the relay disabled still runs those.
     backend.set_busy_probe(_busy_reason)
     await _daemon.start()
+
+    buffer_guard_stop = asyncio.Event()
+
+    async def buffer_guard():
+        from grabette.app.routers.tasks import get_task_manager
+        while not buffer_guard_stop.is_set():
+            try:
+                await _stop_on_buffer_pressure(backend, get_task_manager())
+            except Exception:
+                logger.exception("Buffer auto-stop failed")
+            await asyncio.sleep(.02)
+
+    buffer_guard_task = asyncio.create_task(buffer_guard())
 
     # Start physical button listener on RPi
     if settings.button_enabled:
@@ -1178,6 +1220,9 @@ async def lifespan(app: FastAPI):
     yield
 
     import contextlib
+    # Do not cancel an in-progress queue drain or lose its metadata on shutdown.
+    buffer_guard_stop.set()
+    await buffer_guard_task
     if relay_task is not None:
         relay_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):

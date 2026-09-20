@@ -33,6 +33,8 @@ class CaptureStatus(BaseModel):
     buffer_episode_id: str | None = None
     buffer_stats: dict[str, dict] = Field(default_factory=dict)
     recording_complete: bool = True
+    auto_stop_reason: str = ""
+    auto_stop_episode_id: str | None = None
 
 
 class SensorState(BaseModel):

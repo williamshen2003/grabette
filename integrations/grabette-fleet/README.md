@@ -50,6 +50,14 @@ No report is shown before the first completed recording. Low usage does not
 rule out camera-side frame loss. Latest reports reset when a device restarts;
 episode metadata retains the recorded measurements.
 
+With **Sound** on, rising tones indicate recording started, falling tones
+indicate recording stopped, and three low tones warn of a buffer auto-stop.
+Click the page once to enable browser audio. Cues follow device heartbeats,
+so they may lag capture by a few seconds. Reloading does not replay old cues.
+Each device automatically stops at 95% queue usage even if the browser is closed;
+the session panel displays the reason. This headroom reduces overflow risk but
+does not guarantee zero frame loss if the writer or system stalls suddenly.
+
 Fleet sessions and groups are in memory and do not transfer from the hosted
 fleet or survive a local server restart. Tasks and recordings remain on the Pis.
 This local dashboard does not update the hosted Hugging Face Space.

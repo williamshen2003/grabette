@@ -19,12 +19,15 @@ logger = logging.getLogger(__name__)
 def buffer_summary(capture: dict) -> str:
     """Last completed recording's application RAM queues, not SDK/OS buffers."""
     stats = capture.get("buffer_stats") or {}
+    warning = capture.get("auto_stop_reason") or ""
     if not stats:
-        return ""
+        return warning
     labels = {"depth": "Depth", "oak_left": "OAK left video",
               "oak_right": "OAK right video", "wrist": "Wrist video"}
     lines = [f"Last recording: {capture.get('buffer_episode_id') or 'unknown'}",
              "Peak RAM write-buffer utilization:"]
+    if warning:
+        lines.insert(0, warning)
     for name, s in stats.items():
         lines.append(f"{labels.get(name, name)}: {s['peak_percent']:.1f}% "
                      f"({s['peak_bytes'] / 1024**2:.1f} / {s['capacity_bytes'] / 1024**2:.0f} MiB)")

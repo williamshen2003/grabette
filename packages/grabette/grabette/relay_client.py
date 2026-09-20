@@ -307,6 +307,11 @@ class RelayClient:
                             telemetry = {
                                 "episode_id": capture.get("buffer_episode_id"),
                                 "buffers": capture.get("buffer_stats", {}),
+                                "auto_stop_reason": capture.get("auto_stop_reason", ""),
+                                "auto_stop_episode_id": capture.get("auto_stop_episode_id"),
+                                "is_capturing": capture.get("is_capturing", False),
+                                "is_stopping": capture.get("is_stopping", False),
+                                "capture_episode_id": capture.get("episode_id"),
                             }
                     except Exception:
                         pass  # telemetry must never interrupt device liveness

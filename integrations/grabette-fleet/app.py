@@ -1242,6 +1242,11 @@ class BufferStats(BaseModel):
 class RecordingTelemetry(BaseModel):
     episode_id: Optional[str] = Field(default=None, max_length=200)
     buffers: dict[str, BufferStats] = Field(default_factory=dict, max_length=8)
+    auto_stop_reason: str = Field(default="", max_length=2000)
+    auto_stop_episode_id: Optional[str] = Field(default=None, max_length=200)
+    is_capturing: bool = False
+    is_stopping: bool = False
+    capture_episode_id: Optional[str] = Field(default=None, max_length=200)
 
 
 @app.post("/api/devices/heartbeat")
@@ -5289,14 +5294,16 @@ function recordingBuffersHtml(s){
  const cards=Object.entries(s.members).map(([role,m])=>{
   const d=DEVICES.find(d=>d.device_id===m.device_id);
   const report=d?.recording_buffers||{};
+  const stoppedHere=(s.episodes||[]).some(ep=>ep.episode_id===report.auto_stop_episode_id&&ep.roles?.[role]===m.device_id);
+  const stopWarning=stoppedHere&&report.auto_stop_reason?`<div class="sp-fault-warn">${esc(report.auto_stop_reason)} · ${esc(report.auto_stop_episode_id)}</div>`:'';
   const belongs=(s.episodes||[]).some(ep=>ep.episode_id===report.episode_id&&ep.roles?.[role]===m.device_id);
   const streams=belongs?Object.entries(report.buffers||{}):[];
   const title=`<b>${esc(m.name)} (${esc(role)})</b>${d?.online?'':' · Offline, last reported values'}`;
-  if(!streams.length)return `<div>${title}<p class="muted">No buffer report for this session yet.</p></div>`;
+  if(!streams.length)return `<div>${title}${stopWarning}<p class="muted">No buffer report for this session yet.</p></div>`;
   const rows=streams.map(([name,b])=>`<tr><td>${esc(labels[name]||name)}</td><td>${b.peak_percent.toFixed(1)}%</td><td>${(b.peak_bytes/1048576).toFixed(1)} / ${(b.capacity_bytes/1048576).toFixed(0)} MiB</td></tr>`).join('');
   const warnings=streams.filter(([,b])=>!b.complete||b.rejected_frames||b.write_errors).map(([name,b])=>
    `<div class="sp-fault-warn">${esc(labels[name]||name)}: ${b.rejected_frames} rejected frames, ${b.write_errors} write errors. ${esc(b.error||'')}</div>`).join('');
-  return `<div>${title}<p class="muted">Last saved report: ${esc(report.episode_id)}</p><table><thead><tr><th>Stream</th><th>Peak usage</th><th>Used / capacity</th></tr></thead><tbody>${rows}</tbody></table>${warnings}</div>`;
+  return `<div>${title}${stopWarning}<p class="muted">Last saved report: ${esc(report.episode_id)}</p><table><thead><tr><th>Stream</th><th>Peak usage</th><th>Used / capacity</th></tr></thead><tbody>${rows}</tbody></table>${warnings}</div>`;
  }).join('');
  return `<div class="session-panel"><div class="sp-section-label">Recording buffers</div>${cards}<p class="muted">Updated after saving. Measures RAM write queues; low usage does not rule out camera-side frame loss.</p></div>`;
 }
@@ -5530,13 +5537,40 @@ function chime(tens){
  let at=0;
  for(let i=Math.floor(tens/10);i>0;i--){note(ctx,at,500,.1);note(ctx,at+.12,750,.14);at+=.38;}
  if(tens%10>=5)note(ctx,at,350,.3);}
+function recordingCue(kind){
+ if(!soundOn)return;
+ const ctx=audio();if(!ctx)return;
+ const tones=kind==='start'?[500,800]:kind==='stop'?[800,450]:[250,250,250];
+ tones.forEach((freq,i)=>note(ctx,i*.22,freq,.16));
+}
+const recordingSounds=new Map();
+function checkRecordingSounds(){
+ for(const s of SESSIONS.filter(s=>s.status==='open')){
+  const latest=(s.episodes||[]).at(-1)?.episode_id;
+  const reports=Object.values(s.members).map(m=>DEVICES.find(d=>d.device_id===m.device_id))
+   .filter(d=>d?.online).map(d=>d.recording_buffers||{});
+  let recording=reports.some(r=>r.capture_episode_id===latest&&r.is_capturing&&!r.is_stopping);
+  const alarm=reports.some(r=>r.auto_stop_episode_id===latest&&r.auto_stop_reason)?latest:null;
+  const previous=recordingSounds.get(s.id);
+  // Losing a heartbeat is not confirmation that recording stopped.
+  if(previous?.recording&&!recording&&reports.length<Object.keys(s.members).length)recording=true;
+  // Seed silently on reload. Never replay old alarms or repeat a cue on polling.
+  if(previous){
+   if(alarm&&alarm!==previous.alarm)recordingCue('full');
+   else if(recording&&!previous.recording)recordingCue('start');
+   else if(!recording&&previous.recording)recordingCue('stop');
+  }
+  recordingSounds.set(s.id,{recording,alarm});
+ }
+ for(const id of recordingSounds.keys())if(!SESSIONS.some(s=>s.id===id&&s.status==='open'))recordingSounds.delete(id);
+}
 // A labelled On/Off switch in the recording zone's bottom row, facing the delete
 // button. The knob sits on the state you ARE in — unlike a mute button, there is
 // nothing to read backwards. The tooltip says what the sound IS, not what the
 // click does, so it stays true in both positions.
 function bellIcon(){return '<svg class="bell-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>';}
 function soundSetting(){
- return `<span class="sp-audio" title="A chime plays every ${EPISODE_CHIME_EVERY} recorded episodes">`
+ return `<span class="sp-audio" title="Rising tones: started. Falling tones: stopped. Three low tones: buffer nearly full, automatic stop. Also chimes every ${EPISODE_CHIME_EVERY} episodes.">`
   +`<span class="sp-audio-lbl">${bellIcon()}Audio signal</span>`
   +`<button class="sw" type="button" role="switch" aria-label="Audio signal"`
   +` aria-checked="${soundOn?'true':'false'}" onclick="toggleSound(this)">`
@@ -5604,6 +5638,7 @@ async function uiTick(){
   renderSessionList();
  }
  checkEpisodeChime();  // 1s, not the 3s refresh, so the chime lands on the stop
+ checkRecordingSounds();
  tickRecDur();
 }
 setInterval(uiTick,1000);
