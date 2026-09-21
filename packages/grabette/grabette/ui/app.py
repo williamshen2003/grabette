@@ -408,11 +408,17 @@ def create_ui(api_url: str | None = None) -> gr.Blocks:
         state = client.get_state()
         capturing = state.get("capture", {}).get("is_capturing", False) if state else False
         if capturing:
-            client.stop_capture()
+            result = client.stop_capture()
+            if "error" in result:
+                logger.error("Capture stop failed: %s", result["error"])
+                raise gr.Error(str(result["error"]))
             rows, move_dd, _task_header, desc, *_ = _refresh_episode_table(session_id)
             return gr.update(value="Start Capture", variant="primary"), rows, move_dd, desc
         else:
-            client.start_capture(task_id=session_id or None)
+            result = client.start_capture(task_id=session_id or None)
+            if "error" in result:
+                logger.error("Capture start failed: %s", result["error"])
+                raise gr.Error(str(result["error"]))
             return gr.update(value="Stop Capture", variant="stop"), gr.update(), gr.update(), gr.update()
 
     def on_start_stop_session(current_task):
@@ -480,8 +486,10 @@ def create_ui(api_url: str | None = None) -> gr.Blocks:
         s = client.get_oakd_status() or {}
         enabled = bool(s.get("enabled"))
         result = client.set_oakd(not enabled)
-        if "error" in result:
-            logger.warning("Depth camera toggle failed: %s", result["error"])
+        error = result.get("error") or result.get("hardware_error")
+        if error:
+            logger.error("Depth camera toggle failed: %s", error)
+            raise gr.Error(str(error))
         return _oakd_button_update()
 
     def poll_oakd():
